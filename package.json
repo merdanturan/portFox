@@ -1,0 +1,42 @@
+{
+  "name": "portfox",
+  "version": "0.1.0",
+  "description": "See what's on a port - and free it - in one command. A tiny interactive CLI for developers.",
+  "type": "module",
+  "bin": {
+    "portfox": "bin/portfox.js"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "prepublishOnly": "npm test",
+    "demo": "vhs demo.tape"
+  },
+  "keywords": [
+    "port",
+    "cli",
+    "process",
+    "pid",
+    "lsof",
+    "kill",
+    "devtool",
+    "localhost",
+    "tcp"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/merdanturan/portfox.git"
+  },
+  "bugs": {
+    "url": "https://github.com/merdanturan/portfox/issues"
+  },
+  "homepage": "https://github.com/merdanturan/portfox#readme",
+  "author": "Merdan Turan"
+}
