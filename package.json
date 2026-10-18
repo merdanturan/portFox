@@ -1,6 +1,6 @@
 {
   "name": "portfox",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "See what's on a port - and free it - in one command. A tiny interactive CLI for developers.",
   "type": "module",
   "bin": {
