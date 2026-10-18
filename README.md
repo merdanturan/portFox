@@ -32,7 +32,9 @@ $ portfox 3000
   └────────────────────────────┘
 ```
 
-Pick with `↑`/`↓` (or `j`/`k`), press `Enter`. Killing always asks for confirmation first - and in scripts, where nobody can answer, an explicit `--yes` is required. PortFox kills **exactly** the process that holds the port - the one you want gone - and then verifies the port is actually free.
+Pick with `↑`/`↓` (or `j`/`k`), press `Enter`. Killing asks for confirmation unless you pass `--yes` - and in scripts, where nobody can answer, an explicit `--yes` is required. PortFox re-checks that the selected processes still hold the port before signaling them, then verifies the port is actually free.
+
+Run `portfox` or `portfox list` in a terminal to select a row and manage that port. Returning from the port menu refreshes the list. Press `q` or `Esc` to quit. In pipes and scripts, the list remains a plain table; `--json` remains non-interactive.
 
 ![PortFox demo](./assets/demo.gif)
 
@@ -79,9 +81,14 @@ portfox 3000 --json | jq '.processes[0] | {name, pid, cwd}'
 
 # free it
 portfox kill 3000 --yes
+
+# free it and read the result in a script
+portfox kill 3000 --yes --json
 ```
 
 Killing needs an explicit `--yes` when there is no terminal (CI, cron, scripts), so a stray `portfox kill` can never stop a process on its own.
+
+`kill --json` also requires `--yes`, even in a terminal. It writes one JSON object with `action`, `port`, `success`, `occupied`, `reason`, `processes`, `otherPorts` and `skippedPids`. `occupied` is `null` when the final port state could not be verified. Failure reasons include `confirmation-required`, `no-target`, `permission-denied`, `still-running`, `still-in-use` and `port-unverified`. In JSON mode, runtime failures return an `error` object with `code` and `message` and exit `1`; invalid arguments return `error.code: "USAGE_ERROR"` and exit `2`.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -95,13 +102,15 @@ Killing needs an explicit `--yes` when there is no terminal (CI, cron, scripts),
 - **Linux** - `lsof`, with `ss` → `netstat` fallbacks; cwd from `/proc/<pid>/cwd`
 - **Windows** - `netstat -ano` + `tasklist` (best effort)
 
+If the listening-port scan fails, PortFox reports an error and exits `1` instead of displaying an empty list. Linux tries the next available scanner after a failure; macOS requires `lsof` because BSD `netstat` uses a different format. Process details such as the working directory can still be unavailable due to permissions.
+
 Free-port detection probes `127.0.0.1`, `0.0.0.0`, `::1` and `::`, so ports taken only on IPv6 are never suggested. Bind failures are classified: only `EADDRINUSE` means "busy" - an address the OS refuses to bind (`EADDRNOTAVAIL`, no IPv6 stack) says nothing about the port. Privileged ports and `EPERM` cases are reported with a `sudo` hint instead of a confusing error.
 
 Killing uses SIGTERM first, waits for the process to exit, and offers SIGKILL if it refuses to die.
 
 ### Safety
 
-- Before signaling, PortFox re-checks that each PID still holds the port. A process that exited in the meantime is skipped - a recycled PID is never killed.
+- Before signaling, PortFox re-checks that each PID still holds the port. PIDs that no longer hold it are skipped. This reduces stale-target mistakes but is not an atomic process-identity guarantee: PID reuse or a process changing between the check and the signal can still race.
 - Without a terminal, killing is refused unless `--yes` is passed.
 - If the target also listens on other ports, PortFox says so before you confirm.
 

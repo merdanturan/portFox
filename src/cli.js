@@ -19,7 +19,7 @@ const out = (s) => process.stdout.write(s);
 const err = (s) => process.stderr.write(s);
 
 export async function main(argv) {
-  const opts = { json: false, force: false, yes: false, color: null };
+  const opts = { json: argv.some((arg) => arg === "--json" || arg === "-j"), force: false, yes: false, color: null };
   const positional = [];
   for (const arg of argv) {
     if (arg === "--json" || arg === "-j") opts.json = true;
@@ -29,38 +29,48 @@ export async function main(argv) {
     else if (arg === "--color") opts.color = true;
     else if (arg === "--help" || arg === "-h") return help();
     else if (arg === "--version" || arg === "-v") return version();
-    else if (arg.startsWith("-") && arg !== "-") return usageError(`unknown option "${arg}"`);
+    else if (arg.startsWith("-") && arg !== "-") return usageError(`unknown option "${arg}"`, opts);
     else positional.push(arg);
   }
   if (opts.color !== null) ui.setColorEnabled(opts.color);
-  if (positional.length > 2) return usageError("too many arguments");
+  if (positional.length > 2) return usageError("too many arguments", opts);
 
   const [first, second] = positional;
-  if (!first || first === "list") {
-    if (second !== undefined) return usageError(`"portfox list" takes no arguments`);
-    return list(opts);
+  try {
+    if (!first || first === "list") {
+      if (second !== undefined) return usageError(`"portfox list" takes no arguments`, opts);
+      return await list(opts);
+    }
+    if (first === "kill") return await withPort(second, "a port to kill", (p) => kill(p, opts), opts);
+    if (first === "find") return await withPort(second, "a port to start from", (p) => find(p, opts), opts);
+    if (second !== undefined) return usageError(`unexpected argument "${second}"`, opts);
+    return await withPort(first, "a port to inspect", (p) => inspect(p, opts), opts);
+  } catch (error) {
+    if (!opts.json) throw error;
+    out(JSON.stringify({
+      ...(first === "kill" ? { action: "kill", port: Number(String(second).replace(/^:/, "")), success: false } : {}),
+      error: { code: error.code || "ACTION_FAILED", message: error.message },
+    }, null, 2) + "\n");
+    return 1;
   }
-  if (first === "kill") return withPort(second, "a port to kill", (p) => kill(p, opts));
-  if (first === "find") return withPort(second, "a port to start from", (p) => find(p, opts));
-  if (second !== undefined) return usageError(`unexpected argument "${second}"`);
-  return withPort(first, "a port to inspect", (p) => inspect(p, opts));
 }
 
 /* --------------------------------- plumbing -------------------------------- */
 
 // Ports are decimal numbers only: "3e3" and "0xBB8" are rejected instead of
 // being silently reinterpreted as 3000.
-function withPort(raw, what, fn) {
-  if (raw === undefined) return usageError(`missing ${what}`);
+function withPort(raw, what, fn, opts) {
+  if (raw === undefined) return usageError(`missing ${what}`, opts);
   const input = String(raw).replace(/^:/, "");
-  if (!/^\d+$/.test(input)) return usageError(`"${raw}" is not a valid port number`);
+  if (!/^\d+$/.test(input)) return usageError(`"${raw}" is not a valid port number`, opts);
   const port = Number(input);
-  if (port < 1 || port > 65535) return usageError(`port must be between 1 and 65535, got ${input}`);
+  if (port < 1 || port > 65535) return usageError(`port must be between 1 and 65535, got ${input}`, opts);
   return fn(port);
 }
 
-function usageError(message) {
-  err(`\n  portfox: ${message}\n  Run "portfox --help" for usage.\n`);
+function usageError(message, opts = {}) {
+  if (opts.json) out(JSON.stringify({ error: { code: "USAGE_ERROR", message } }, null, 2) + "\n");
+  else err(`\n  portfox: ${message}\n  Run "portfox --help" for usage.\n`);
   return 2;
 }
 
@@ -110,6 +120,14 @@ function describeTarget(listeners) {
 /* ---------------------------------- list ----------------------------------- */
 
 async function list(opts) {
+  for (;;) {
+    const port = await showList(opts);
+    if (port === null) return 0;
+    await inspect(port, opts);
+  }
+}
+
+async function showList(opts) {
   const listeners = await ui.withSpinner("Scanning ports…", () => listListeners());
   const rows = listeners
     .flatMap((l) => l.ports.map((port) => ({ port, listener: l })))
@@ -132,25 +150,31 @@ async function list(opts) {
 
   if (opts.json) {
     out(JSON.stringify(data, null, 2) + "\n");
-    return 0;
+    return null;
   }
 
   ui.printHeader();
   if (!data.length) {
     out(`  ${ui.dim("No listening ports found.")}\n\n`);
-    return 0;
+    return null;
   }
-  ui.printTable(
-    ["PORT", "PROCESS", "PID", "PROJECT"],
-    data.map((r) => [
-      String(r.port),
-      r.process || "?",
-      r.pid ? String(r.pid) : "-",
-      r.project ? ui.displayPath(r.project, 44) : "-",
-    ])
-  );
+  const headers = ["PORT", "PROCESS", "PID", "PROJECT"];
+  const cells = data.map((r) => [
+    String(r.port),
+    r.process || "?",
+    r.pid ? String(r.pid) : "-",
+    r.project ? ui.displayPath(r.project, 44) : "-",
+  ]);
+  if (ui.isInteractive()) {
+    const [heading, ...items] = ui.formatTable(headers, cells);
+    out(`  ${ui.dim("↑/↓ or j/k to select · Enter to manage · q to quit")}\n\n`);
+    out(`    ${ui.dim(heading)}\n`);
+    const choice = await ui.selectMenu(items);
+    return choice === null ? null : data[choice].port;
+  }
+  ui.printTable(headers, cells);
   out(`\n  ${ui.dim(`${data.length} listening ${data.length === 1 ? "port" : "ports"}`)}\n\n`);
-  return 0;
+  return null;
 }
 
 /* --------------------------------- inspect --------------------------------- */
@@ -245,60 +269,78 @@ async function menu(port, result, infos, opts) {
 async function kill(port, opts) {
   const result = await ui.withSpinner(`Scanning port ${port}…`, () => inspectPort(port));
   if (!result.occupied) {
+    if (opts.json) return killJson(port, [], { success: true, occupied: false });
     ui.printHeader();
     out(`  ${ui.green("✔")} Port ${ui.yellow(String(port))} is not in use\n\n`);
     return 0;
   }
   const infos = await Promise.all(result.listeners.map((l) => (l.pid ? getProcessInfo(l.pid) : null)));
-  ui.printHeader();
-  ui.printSummary(port, result, infos);
+  if (!opts.json) {
+    ui.printHeader();
+    ui.printSummary(port, result, infos);
+  }
 
   if (!killTargets(result.listeners).length) {
+    if (opts.json) return killJson(port, result.listeners, { reason: "no-target" });
     out(`  ${ui.red("✘")} Could not identify the process - try ${ui.cyan(`sudo portfox kill ${port}`)}\n\n`);
     return 1;
   }
 
   // No terminal means no one to ask: require --yes so a stray kill in a
   // script or CI job can never stop a process on its own.
-  if (!ui.isInteractive() && !opts.yes) {
+  const interactive = ui.isInteractive() && !opts.json;
+  if (!interactive && !opts.yes) {
+    if (opts.json) return killJson(port, result.listeners, { reason: "confirmation-required" });
     out(`  ${ui.red("✘")} Refusing to kill without confirmation in a non-interactive shell.\n`);
     out(`    Pass ${ui.cyan("--yes")} to go ahead: ${ui.cyan(`portfox kill ${port} --yes`)}\n\n`);
     return 1;
   }
 
-  await warnSideEffects(port, result.listeners);
-  if (ui.isInteractive() && !opts.yes) {
+  const otherPorts = await warnSideEffects(port, result.listeners, opts);
+  if (interactive && !opts.yes) {
     const target = describeTarget(result.listeners);
     if (!(await ui.confirm(`Kill ${target}?`))) return 1;
   }
 
   let outcome = await ui.withSpinner("Stopping…", () => stop(port, result.listeners, opts.force));
-  if (!outcome.stopped && outcome.reason === "alive" && !opts.force && ui.isInteractive() && !opts.yes) {
+  if (!outcome.stopped && outcome.reason === "alive" && !opts.force && interactive && !opts.yes) {
     if (await ui.confirm("It did not exit. Force kill (SIGKILL)?")) {
       outcome = await ui.withSpinner("Stopping…", () => stop(port, result.listeners, true));
     }
   }
-  return report(port, result.listeners, outcome);
+  return report(port, result.listeners, outcome, opts, otherPorts);
+}
+
+function killJson(port, listeners, {
+  success = false, occupied = true, reason = null, otherPorts = [], skippedPids = [],
+} = {}) {
+  out(JSON.stringify({
+    action: "kill", port, success, occupied, reason,
+    processes: listeners.map(({ pid, name }) => ({ pid, name })),
+    otherPorts, skippedPids,
+  }, null, 2) + "\n");
+  return success ? 0 : 1;
 }
 
 const killTargets = (listeners) =>
   listeners.filter((l) => l.pid && l.pid !== process.pid).map((l) => l.pid);
 
-async function warnSideEffects(port, listeners) {
+async function warnSideEffects(port, listeners, opts = {}) {
   const extra = await ui.withSpinner("Checking for side effects…", () =>
     otherPortsForPids(killTargets(listeners), port)
   );
-  if (extra.length) {
+  if (extra.length && !opts.json) {
     out(`  ${ui.yellow("!")} ${describeTarget(listeners)} also listens on ${extra.join(", ")} - killing it closes those too.\n\n`);
   }
+  return extra;
 }
 
 async function stop(port, listeners, force) {
   const targets = killTargets(listeners);
   if (!targets.length) return { stopped: false, reason: "unknown" };
 
-  // Re-check right before signaling: if nothing holds the port anymore, the
-  // original PIDs are stale (or recycled) and must not be touched.
+  // Re-check right before signaling and skip PIDs no longer on this port.
+  // The check and signal are separate OS operations, so a race remains.
   const { alive, vanished } = await revalidateTargets(port, targets);
   if (!alive.length) return { stopped: false, reason: "vanished", vanished };
 
@@ -315,7 +357,19 @@ async function stop(port, listeners, force) {
   return { stopped: exited, reason: exited ? null : "alive", vanished, eperm };
 }
 
-async function report(port, listeners, outcome) {
+async function report(port, listeners, outcome, opts = {}, otherPorts = []) {
+  if (opts.json) {
+    const state = outcome.stopped || outcome.reason === "vanished" ? await probePort(port) : null;
+    const success = state === "free";
+    return killJson(port, listeners, {
+      success,
+      occupied: state === "free" ? false : state === "in-use" ? true : null,
+      reason: success ? null : outcome.reason === "eperm" ? "permission-denied"
+        : outcome.reason === "alive" ? "still-running"
+        : state === "in-use" ? "still-in-use" : "port-unverified",
+      otherPorts, skippedPids: outcome.vanished || [],
+    });
+  }
   if (outcome.stopped) {
     out(`  ${ui.green("✔")} Stopped ${ui.bold(describeTarget(listeners))}\n\n`);
     if (outcome.vanished?.length) {

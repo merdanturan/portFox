@@ -22,9 +22,14 @@ async function run(cmd, args) {
     });
     return { ok: true, stdout: String(stdout) };
   } catch (err) {
-    if (err && err.code === "ENOENT") return { ok: false, missing: true, stdout: "" };
-    if (err && !err.killed && typeof err.stdout === "string") return { ok: true, stdout: String(err.stdout) };
-    return { ok: false, stdout: "" };
+    // lsof exits 1 for an empty selection. Keep that distinct from a failed,
+    // timed-out or truncated scan; callers decide whether emptiness is valid.
+    return {
+      ok: false,
+      emptySelection: err?.code === 1 && !err.killed && !err.signal &&
+        err.stdout === "" && err.stderr === "",
+      stdout: "",
+    };
   }
 }
 
@@ -193,7 +198,7 @@ async function windowsTaskNames(pids) {
 
 async function windowsListening(port) {
   const res = await run("netstat", ["-ano", "-p", "tcp"]);
-  if (!res.ok) return [];
+  if (!res.ok) throw scanError();
   let rows = parseNetstatWindows(res.stdout);
   if (port) rows = rows.filter((r) => r.port === port);
   const names = await windowsTaskNames([...new Set(rows.map((r) => r.pid))]);
@@ -202,24 +207,27 @@ async function windowsListening(port) {
 
 export async function findListeners(port) {
   if (isWin) return listenersFromRows(await windowsListening(port));
-  const lsof = await run("lsof", ["-nP", "-w", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpcn"]);
-  if (!lsof.missing) return listenersFromLsof(lsof.stdout, port);
-  const ss = await run("ss", ["-ltnpH"]);
-  if (!ss.missing) return listenersFromRows(parseSsOutput(ss.stdout).filter((r) => r.port === port));
-  const ns = await run("netstat", ["-ltn"]);
-  if (!ns.missing) return listenersFromRows(parseNetstatUnix(ns.stdout).filter((r) => r.port === port));
-  return [];
+  const lsof = await run("lsof", ["-nP", "-w", port ? `-iTCP:${port}` : "-iTCP", "-sTCP:LISTEN", "-Fpcn"]);
+  if (lsof.ok || lsof.emptySelection) return listenersFromLsof(lsof.stdout, port);
+  // ss and netstat -ltnp use Linux formats; BSD netstat is not a substitute.
+  if (!isMac) {
+    const ss = await run("ss", ["-ltnpH"]);
+    if (ss.ok) return listenersFromRows(parseSsOutput(ss.stdout).filter((r) => !port || r.port === port));
+    const ns = await run("netstat", ["-ltnp"]);
+    if (ns.ok) return listenersFromRows(parseNetstatUnix(ns.stdout).filter((r) => !port || r.port === port));
+  }
+  throw scanError();
 }
 
 export async function listListeners() {
-  if (isWin) return listenersFromRows(await windowsListening());
-  const lsof = await run("lsof", ["-nP", "-w", "-iTCP", "-sTCP:LISTEN", "-Fpcn"]);
-  if (lsof.ok) return listenersFromLsof(lsof.stdout);
-  const ss = await run("ss", ["-ltnpH"]);
-  if (ss.ok) return listenersFromRows(parseSsOutput(ss.stdout));
-  const ns = await run("netstat", ["-ltn"]);
-  if (ns.ok) return listenersFromRows(parseNetstatUnix(ns.stdout));
-  return [];
+  return findListeners();
+}
+
+function scanError() {
+  return Object.assign(new Error(
+    isWin ? "Unable to scan listening ports. Check that netstat is available and permitted."
+      : `Unable to scan listening ports. Check that ${isMac ? "lsof is" : "lsof, ss or netstat is"} installed and permitted.`
+  ), { code: "PORT_SCAN_FAILED" });
 }
 
 async function findAllSockets(port) {

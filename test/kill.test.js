@@ -107,10 +107,32 @@ test("kill in a non-interactive shell without --yes is refused", async () => {
 test("kill --yes stops the listener and frees the port", async () => {
   const [port] = await freePorts(1);
   const server = await spawnServer([port]);
-  const res = await runCli(["kill", String(port), "--yes"]);
-  assert.equal(res.code, 0, res.stdout + res.stderr);
-  assert.equal(await waitExit(server), true, "the server should exit after SIGTERM");
-  assert.equal(await probePort(port), "free");
+  try {
+    const res = await runCli(["kill", String(port), "--yes"]);
+    assert.equal(res.code, 0, res.stdout + res.stderr);
+    assert.equal(await waitExit(server), true, "the server should exit after SIGTERM");
+    assert.equal(await probePort(port), "free");
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test("kill --json --yes returns JSON after stopping a real listener", async () => {
+  const [port] = await freePorts(1);
+  const server = await spawnServer([port]);
+  try {
+    const res = await runCli(["kill", String(port), "--json", "--yes"]);
+    assert.equal(res.code, 0, res.stdout + res.stderr);
+    const result = JSON.parse(res.stdout);
+    assert.equal(result.port, port);
+    assert.equal(result.success, true);
+    assert.equal(result.occupied, false);
+    assert.equal(result.processes[0].pid, server.pid);
+    assert.equal(await waitExit(server), true);
+    assert.equal(await probePort(port), "free");
+  } finally {
+    await stopServer(server);
+  }
 });
 
 test("kill on a free port exits 0 without doing anything", async () => {
@@ -179,11 +201,13 @@ test("list --json keeps addresses scoped to their own port", async () => {
   }
 });
 
-test("unauthorized processes produce a clear error", { skip: process.platform === "win32" || (process.getuid && process.getuid() === 0) }, () => {
-  const res = sendSignal(1, "SIGTERM");
+test("unauthorized processes produce a clear error", (t) => {
+  // Exercise the OS error boundary without ever signaling a host service.
+  t.mock.method(process, "kill", () => { throw Object.assign(new Error("denied"), { code: "EPERM" }); });
+  const res = sendSignal(12345, "SIGTERM");
   assert.equal(res.ok, false);
   assert.equal(res.reason, "eperm");
-  assert.equal(isAlive(1), true, "PID 1 must be untouched");
+  assert.equal(isAlive(12345), true, "permission denied does not mean the process is gone");
 });
 
 test("port syntax is validated strictly", async () => {

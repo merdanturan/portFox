@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
+import { EventEmitter } from "node:events";
 import { bindTest, findAvailablePorts, inspectPort, probePort } from "../src/ports.js";
 
 function listen(host = "127.0.0.1") {
@@ -72,7 +73,17 @@ test("bindTest separates unusable addresses from busy ones", async () => {
   assert.ok(res === "unavailable" || res === "error", `expected unavailable/error, got ${res}`);
 });
 
-test("probePort classifies privileged ports as denied", { skip: process.platform === "win32" || (process.getuid && process.getuid() === 0) }, async () => {
-  const res = await bindTest(80, "127.0.0.1");
-  assert.ok(res === "denied" || res === "in-use", `expected denied/in-use, got ${res}`);
+test("bindTest classifies permission errors as denied", async (t) => {
+  // Low ports may be unprivileged on Linux, so simulate the actual OS errors
+  // rather than assuming that binding port 80 must fail on every machine.
+  for (const code of ["EACCES", "EPERM"]) {
+    const server = new EventEmitter();
+    server.unref = () => server;
+    server.listen = () => {
+      queueMicrotask(() => server.emit("error", Object.assign(new Error("denied"), { code })));
+    };
+    const replacement = t.mock.method(net, "createServer", () => server);
+    assert.equal(await bindTest(80, "127.0.0.1"), "denied");
+    replacement.mock.restore();
+  }
 });

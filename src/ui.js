@@ -30,6 +30,11 @@ export const visibleWidth = (s) => stripAnsi(s).length;
 export const padEndVisible = (s, w) => s + " ".repeat(Math.max(0, w - visibleWidth(s)));
 export const padStartVisible = (s, w) => " ".repeat(Math.max(0, w - visibleWidth(s))) + s;
 
+function fitText(value, width) {
+  const text = stripAnsi(value);
+  return text.length <= width ? text : text.slice(0, Math.max(0, width - 1)) + "…";
+}
+
 /* ------------------------------- formatting ------------------------------- */
 
 export function tildify(p) {
@@ -112,7 +117,7 @@ export function printSummary(port, result, infos) {
     return;
   }
 
-  const info = infos[0] || {};
+  const info = { ...result.listeners?.[0], ...infos[0] };
   out.push(field("Process:", info.name ? bold(info.name) : "-"));
   out.push(field("PID:", info.pid ? String(info.pid) : "-"));
   out.push(field("Project:", displayPath(info.cwd)));
@@ -122,7 +127,10 @@ export function printSummary(port, result, infos) {
   if (infos.length > 1) {
     const others = infos
       .slice(1)
-      .map((i) => `${i.name || "?"} (${i.pid || "?"})`)
+      .map((info, index) => {
+        const other = { ...result.listeners?.[index + 1], ...info };
+        return `${other.name || "?"} (${other.pid || "?"})`;
+      })
       .join(", ");
     out.push(field("Others:", others));
   }
@@ -187,18 +195,22 @@ export function frame(lines, pad = 1) {
   return [top, ...body, bottom];
 }
 
-export function printTable(headers, rows) {
+export function formatTable(headers, rows) {
   const widths = headers.map((h, i) =>
     Math.max(visibleWidth(h), ...rows.map((r) => visibleWidth(String(r[i] ?? ""))))
   );
-  const line = (cells, style) =>
-    "  " +
+  const line = (cells) =>
     cells
-      .map((c, i) => style(padEndVisible(String(c ?? ""), widths[i])))
+      .map((c, i) => padEndVisible(String(c ?? ""), widths[i]))
       .join("   ")
       .trimEnd();
-  process.stdout.write(line(headers, dim) + "\n");
-  for (const row of rows) process.stdout.write(line(row, (s) => s) + "\n");
+  return [line(headers), ...rows.map(line)];
+}
+
+export function printTable(headers, rows) {
+  const [heading, ...body] = formatTable(headers, rows);
+  process.stdout.write(`  ${dim(heading)}\n`);
+  for (const line of body) process.stdout.write(`  ${line}\n`);
 }
 
 export function startSpinner(text) {
@@ -334,9 +346,8 @@ export function exitCleanly(code) {
 }
 
 export async function selectMenu(items) {
-  if (!isInteractive()) return null;
+  if (!isInteractive() || !items.length) return null;
   return withRaw(async () => {
-    const width = Math.max(...items.map(visibleWidth));
     let selected = 0;
     let printed = 0;
     const clear = () => {
@@ -345,12 +356,20 @@ export async function selectMenu(items) {
     };
     for (;;) {
       if (printed) clear();
+      const pageSize = Math.max(1, (process.stdout.rows || 24) - 7);
+      const columns = process.stdout.columns || 80;
+      // Prefix, frame padding and selection marker occupy eight columns.
+      const itemWidth = Math.max(1, columns - 8);
+      const start = Math.floor(selected / pageSize) * pageSize;
       const lines = frame(
-        items.map((item, i) => {
+        items.slice(start, start + pageSize).map((item, index) => {
+          const i = start + index;
           const marker = i === selected ? cyan("❯") : " ";
-          return `${marker} ${i === selected ? bold(item) : item}`;
+          const label = fitText(item, itemWidth);
+          return `${marker} ${i === selected ? bold(label) : label}`;
         })
       ).map((l) => "  " + l);
+      if (items.length > pageSize) lines.push(`  ${dim(fitText(`${selected + 1}/${items.length} · ↑/↓ select · Enter choose · q back`, Math.max(1, columns - 2)))}`);
       process.stdout.write(lines.join("\n") + "\n");
       printed = lines.length;
 
